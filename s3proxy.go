@@ -494,14 +494,24 @@ func (p S3Proxy) GetHandler(w http.ResponseWriter, r *http.Request, fullPath str
 	}
 	if err != nil {
 		caddyErr := convertToCaddyError(err)
-		if caddyErr.StatusCode == http.StatusNotFound {
+		switch caddyErr.StatusCode {
+		case http.StatusNotFound:
 			// Log as debug as this one may be quite common
 			p.log.Debug("not found",
 				zap.String("bucket", p.Bucket),
 				zap.String("key", fullPath),
 				zap.String("err", caddyErr.Error()),
 			)
-		} else {
+		case http.StatusNotModified, http.StatusPreconditionFailed, http.StatusRequestedRangeNotSatisfiable:
+			// Conditional/range outcomes (If-None-Match, If-Modified-Since,
+			// Range) are normal client-cache behaviour, not errors. ServeHTTP
+			// passes these status codes straight through to the client.
+			p.log.Debug("conditional request outcome",
+				zap.Int("status", caddyErr.StatusCode),
+				zap.String("bucket", p.Bucket),
+				zap.String("key", fullPath),
+			)
+		default:
 			p.log.Error("failed to get object",
 				zap.String("bucket", p.Bucket),
 				zap.String("key", fullPath),
