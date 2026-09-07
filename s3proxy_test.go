@@ -468,6 +468,85 @@ func TestProxy(t *testing.T) {
 			expectedCode:         http.StatusOK,
 			expectedResponseText: `{"foo": "bar"}`,
 		},
+		{
+			name:         "HEAD serves headers without a body",
+			proxy:        S3Proxy{Bucket: bucketName},
+			method:       http.MethodHead,
+			path:         "/test.json",
+			expectedCode: http.StatusOK,
+			expectedHeaders: http.Header{
+				"Content-Type": []string{"application/json"},
+			},
+			expectsEmptyResponse: true,
+		},
+		{
+			name:                 "HEAD on missing key returns 404",
+			proxy:                S3Proxy{Bucket: bucketName},
+			method:               http.MethodHead,
+			path:                 "/doesnt-exist",
+			expectedCode:         http.StatusNotFound,
+			expectsEmptyResponse: true,
+		},
+		{
+			name:                 "HEAD hidden file returns 404",
+			proxy:                S3Proxy{Bucket: bucketName, Hide: []string{"test.json"}},
+			method:               http.MethodHead,
+			path:                 "/test.json",
+			expectedCode:         http.StatusNotFound,
+			expectsEmptyResponse: true,
+		},
+		{
+			name:                 "HEAD resolves a directory index",
+			proxy:                S3Proxy{Bucket: bucketName, IndexNames: []string{"index.html"}},
+			method:               http.MethodHead,
+			path:                 "/inner/",
+			expectedCode:         http.StatusOK,
+			expectsEmptyResponse: true,
+		},
+		{
+			name:                 "HEAD on a directory without index is forbidden",
+			proxy:                S3Proxy{Bucket: bucketName},
+			method:               http.MethodHead,
+			path:                 "/inner/",
+			expectedCode:         http.StatusForbidden,
+			expectsEmptyResponse: true,
+		},
+		{
+			name:   "HEAD honors If-None-Match on a file",
+			proxy:  S3Proxy{Bucket: bucketName},
+			method: http.MethodHead,
+			path:   "/test.json",
+			headers: http.Header{
+				"If-None-Match": []string{`"a38212e01d6f419c9bd303b304a99e9b"`},
+			},
+			expectedCode:         http.StatusNotModified,
+			expectsEmptyResponse: true,
+		},
+		{
+			name:   "HEAD honors If-None-Match on an index (regression #63)",
+			proxy:  S3Proxy{Bucket: bucketName, IndexNames: []string{"index.html"}},
+			method: http.MethodHead,
+			path:   "/inner/",
+			headers: http.Header{
+				"If-None-Match": []string{`"44bacca965de5aef310706cc55c4a7b0"`},
+			},
+			expectedCode:         http.StatusNotModified,
+			expectsEmptyResponse: true,
+		},
+		{
+			name:   "HEAD with a non-matching If-None-Match returns 200 headers-only",
+			proxy:  S3Proxy{Bucket: bucketName},
+			method: http.MethodHead,
+			path:   "/test.json",
+			headers: http.Header{
+				"If-None-Match": []string{`"no good etag"`},
+			},
+			expectedCode: http.StatusOK,
+			expectedHeaders: http.Header{
+				"Content-Type": []string{"application/json"},
+			},
+			expectsEmptyResponse: true,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var body io.Reader
