@@ -370,15 +370,22 @@ func TestProxy(t *testing.T) {
 			expectedResponseText: `this is a default error page`,
 		},
 		{
-			name:   "returns range",
+			name:   "returns range as 206 with Content-Range",
 			proxy:  S3Proxy{Bucket: bucketName},
 			method: http.MethodGet,
 			path:   "/test.json",
 			headers: http.Header{
 				"Range": []string{"bytes=0-4"},
 			},
-			expectedCode:         http.StatusOK,
+			// This case asserted 200 until the ranged body was noticed to be
+			// described as a complete response: the client was told those 5
+			// bytes were the whole 15-byte object.
+			expectedCode:         http.StatusPartialContent,
 			expectedResponseText: `{"foo`,
+			expectedHeaders: http.Header{
+				"Content-Range": []string{"bytes 0-4/15"},
+				"Accept-Ranges": []string{"bytes"},
+			},
 		},
 		{
 			name:   "returns 200 code If-Match",
@@ -531,6 +538,35 @@ func TestProxy(t *testing.T) {
 				"If-None-Match": []string{`"44bacca965de5aef310706cc55c4a7b0"`},
 			},
 			expectedCode:         http.StatusNotModified,
+			expectsEmptyResponse: true,
+		},
+		{
+			name:                 "unranged GET advertises Accept-Ranges",
+			proxy:                S3Proxy{Bucket: bucketName},
+			method:               http.MethodGet,
+			path:                 "/test.json",
+			expectedCode:         http.StatusOK,
+			expectedResponseText: `{"foo": "bar"}`,
+			expectedHeaders: http.Header{
+				"Accept-Ranges": []string{"bytes"},
+			},
+		},
+		{
+			name:   "ranged HEAD reports the full size, not the range length",
+			proxy:  S3Proxy{Bucket: bucketName},
+			method: http.MethodHead,
+			path:   "/test.json",
+			headers: http.Header{
+				"Range": []string{"bytes=0-3"},
+			},
+			expectedCode: http.StatusOK,
+			expectedHeaders: http.Header{
+				// Range is not forwarded to HeadObject, so this stays the whole
+				// object's length. Reporting 4 here with no Content-Range beside
+				// it told clients the object was 4 bytes long.
+				"Content-Length": []string{"15"},
+				"Accept-Ranges":  []string{"bytes"},
+			},
 			expectsEmptyResponse: true,
 		},
 		{

@@ -117,16 +117,22 @@ func (p S3Proxy) HeadHandler(w http.ResponseWriter, r *http.Request, fullPath st
 }
 
 // headS3Object mirrors getS3Object but issues a HeadObject, forwarding the same
-// conditional and range request headers so caching behaviour matches GET.
+// conditional request headers so caching behaviour matches GET.
+//
+// Range is deliberately NOT forwarded. A ranged HeadObject answers with the
+// range's length in ContentLength, but s3.HeadObjectOutput has no ContentRange
+// field (the SDK does not model that header for HeadObject, unlike
+// GetObjectOutput), so we could not tell the client which range those bytes
+// describe. Passing the range through anyway is what produced a Content-Length
+// of the range with no Content-Range beside it — a HEAD that reports a 1 KiB
+// object for a 4.7 MB video. A HEAD carries no body, so answering with the full
+// representation's metadata is both truthful and the more useful answer.
 func (p S3Proxy) headS3Object(bucket string, path string, headers http.Header) (*s3.HeadObjectOutput, error) {
 	oi := &s3.HeadObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(path),
 	}
 
-	if rg := headers.Get("Range"); rg != "" {
-		oi = oi.SetRange(rg)
-	}
 	if ifMatch := headers.Get("If-Match"); ifMatch != "" {
 		oi = oi.SetIfMatch(ifMatch)
 	}
@@ -166,6 +172,12 @@ func writeHeadersFromHeadObject(w http.ResponseWriter, obj *s3.HeadObjectOutput)
 	setStrHeader(w, "Expires", obj.Expires)
 	setTimeHeader(w, "Last-Modified", obj.LastModified)
 
+	// Every S3 object is range-requestable; see writeResponseFromGetObject.
+	// A media client that probes with HEAD decides here whether seeking is
+	// even possible.
+	w.Header().Set("Accept-Ranges", "bytes")
+
+	// headS3Object does not forward Range, so this is the full object's size.
 	if obj.ContentLength != nil {
 		w.Header().Set("Content-Length", strconv.FormatInt(*obj.ContentLength, 10))
 	}

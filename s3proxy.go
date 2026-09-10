@@ -11,6 +11,7 @@ import (
 	"path"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"time"
 
@@ -323,6 +324,13 @@ func (p S3Proxy) writeResponseFromGetObject(w http.ResponseWriter, obj *s3.GetOb
 	setStrHeader(w, "Expires", obj.Expires)
 	setTimeHeader(w, "Last-Modified", obj.LastModified)
 
+	// Every S3 object can be fetched by byte range, so advertise it. Clients
+	// only build a seekable buffer for a media resource whose response says
+	// ranges are supported; without this header a <video> keeps an empty
+	// .seekable and every seek snaps back to the first frame, however
+	// correctly we answer the Range requests themselves.
+	w.Header().Set("Accept-Ranges", "bytes")
+
 	// Adds all custom headers which where used on this object
 	for key, value := range obj.Metadata {
 		setStrHeader(w, key, value)
@@ -332,6 +340,21 @@ func (p S3Proxy) writeResponseFromGetObject(w http.ResponseWriter, obj *s3.GetOb
 	if obj.Body != nil {
 		// io.Copy will set Content-Length
 		w.Header().Del("Content-Length")
+		// A ranged GetObject returns just that range, so the response must say
+		// 206 — a 200 tells the client those bytes are the whole object. Written
+		// after the headers above and before the body, since the first Write
+		// would otherwise commit an implicit 200.
+		if aws.StringValue(obj.ContentRange) != "" {
+			// Restate the length instead of leaving it to net/http: it only
+			// derives one while the whole body fits its write buffer, so
+			// ranges past a few hundred bytes — i.e. every media chunk — went
+			// out chunked and length-less. Safe beside `encode`, which leaves
+			// a 206 uncompressed, so this stays the length actually sent.
+			if obj.ContentLength != nil {
+				w.Header().Set("Content-Length", strconv.FormatInt(*obj.ContentLength, 10))
+			}
+			w.WriteHeader(http.StatusPartialContent)
+		}
 		_, err = io.Copy(w, obj.Body)
 	}
 
