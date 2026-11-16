@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
 	caddy "github.com/caddyserver/caddy/v2"
@@ -470,6 +469,11 @@ func (p S3Proxy) GetHandler(w http.ResponseWriter, r *http.Request, fullPath str
 	isDir := strings.HasSuffix(fullPath, "/")
 	var obj *s3.GetObjectOutput
 	var err error
+	// First index lookup failure that is *not* a plain "no such key". A missing
+	// index is the normal case for a directory without one; anything else
+	// (AccessDenied, throttling, ...) must stay visible instead of being hidden
+	// behind the 404 answered below.
+	var indexErr error
 
 	if isDir && len(p.IndexNames) > 0 {
 		for _, indexPage := range p.IndexNames {
@@ -489,32 +493,41 @@ func (p S3Proxy) GetHandler(w http.ResponseWriter, r *http.Request, fullPath str
 				isDir = false
 				break
 			}
-			logIt := true
-			if aerr, ok := err.(awserr.Error); ok {
-				// Getting no such key here could be rather common
-				// So only log a warning if we get any other type of error
-				if aerr.Code() != s3.ErrCodeNoSuchKey {
-					logIt = false
+			// A missing index is common and not worth a warning; only log
+			// (and remember) any other kind of failure.
+			if caddyErr.StatusCode != http.StatusNotFound {
+				if indexErr == nil {
+					indexErr = err
 				}
-			}
-			if logIt {
 				p.log.Warn("error when looking for index",
 					zap.String("bucket", p.Bucket),
-					zap.String("key", fullPath),
+					zap.String("key", indexPath),
 					zap.String("err", err.Error()),
 				)
 			}
 		}
 	}
 
-	// If this is still a dir then browse or throw an error
+	// Still a directory: no index resolved.
 	if isDir {
 		if p.EnableBrowse {
 			return p.BrowseHandler(w, r, fullPath)
-		} else {
-			err = errors.New("can not view a directory")
-			return caddyhttp.Error(http.StatusForbidden, err)
 		}
+		if indexErr != nil {
+			// The index lookup failed for a real reason (403 AccessDenied,
+			// 500, ...). Surface that status rather than masking it as 404.
+			return convertToCaddyError(indexErr)
+		}
+		// No index page and no browsing: for a static site this URL simply
+		// does not exist. Upstream answered 403 "can not view a directory",
+		// which search engines treat as "access denied, retry later" and
+		// which never reaches the `errors 404` page. A file server answers
+		// 404 for a directory without an index page, so do the same.
+		p.log.Debug("directory without index page",
+			zap.String("bucket", p.Bucket),
+			zap.String("key", fullPath),
+		)
+		return caddyhttp.Error(http.StatusNotFound, errors.New("directory without index page"))
 	}
 
 	// Get the obj from S3 (skip if we already did when looking for an index)

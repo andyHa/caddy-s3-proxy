@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
 	"go.uber.org/zap"
@@ -33,6 +32,9 @@ func (p S3Proxy) HeadHandler(w http.ResponseWriter, r *http.Request, fullPath st
 	isDir := strings.HasSuffix(fullPath, "/")
 	var obj *s3.HeadObjectOutput
 	var err error
+	// First index lookup failure that is not a plain "not found"; see
+	// GetHandler for why it must not be hidden behind the 404 below.
+	var indexErr error
 
 	if isDir && len(p.IndexNames) > 0 {
 		for _, indexPage := range p.IndexNames {
@@ -51,19 +53,17 @@ func (p S3Proxy) HeadHandler(w http.ResponseWriter, r *http.Request, fullPath st
 				isDir = false
 				break
 			}
-			logIt := true
-			if aerr, ok := err.(awserr.Error); ok {
-				// HeadObject reports a missing key as "NotFound" where
-				// GetObject reports "NoSuchKey"; both are the common
-				// "no index here" case and are not worth a warning.
-				if aerr.Code() != s3.ErrCodeNoSuchKey && aerr.Code() != "NotFound" {
-					logIt = false
+			// HeadObject reports a missing key as "NotFound" where GetObject
+			// reports "NoSuchKey"; both map to 404 and are the common "no
+			// index here" case, not worth a warning. Only log (and remember)
+			// any other kind of failure.
+			if caddyErr.StatusCode != http.StatusNotFound {
+				if indexErr == nil {
+					indexErr = err
 				}
-			}
-			if logIt {
 				p.log.Warn("error when looking for index",
 					zap.String("bucket", p.Bucket),
-					zap.String("key", fullPath),
+					zap.String("key", indexPath),
 					zap.String("err", err.Error()),
 				)
 			}
@@ -78,7 +78,14 @@ func (p S3Proxy) HeadHandler(w http.ResponseWriter, r *http.Request, fullPath st
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			return nil
 		}
-		return caddyhttp.Error(http.StatusForbidden, errors.New("can not view a directory"))
+		if indexErr != nil {
+			// Real failure while looking for the index (403, 500, ...):
+			// surface it instead of masking it as 404.
+			return convertToCaddyError(indexErr)
+		}
+		// No index page and no browsing: 404, exactly as GetHandler answers,
+		// so HEAD and GET agree and link checkers see "gone", not "denied".
+		return caddyhttp.Error(http.StatusNotFound, errors.New("directory without index page"))
 	}
 
 	// Head the object (skip if we already did while resolving an index).
